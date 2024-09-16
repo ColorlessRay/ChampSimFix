@@ -622,3 +622,125 @@ void MEMORY_CONTROLLER::print_deadlock()
 {
 }
 // LCOV_EXCL_STOP
+class MINE final : public IAddrMapper, public Implementation {
+  RAMULATOR_REGISTER_IMPLEMENTATION(IAddrMapper, MINE, "MINE", "Applies a My method mapping to the address.");
+
+    public:
+    IDRAM* m_dram = nullptr;
+
+    int m_num_levels = -1;          // How many levels in the hierarchy?
+    std::vector<int> m_addr_bits;   // How many address bits for each level in the hierarchy?
+    Addr_t m_tx_offset = -1;
+
+    int m_col_bits_idx = -1;
+    int m_row_bits_idx = -1;
+
+    void init() override { };
+    void setup(IFrontEnd* frontend, IMemorySystem* memory_system) {
+      m_dram = memory_system->get_ifce<IDRAM>();
+
+      // Populate m_addr_bits vector with the number of address bits for each level in the hierachy
+      const auto& count = m_dram->m_organization.count;
+      m_num_levels = count.size();
+      m_addr_bits.resize(m_num_levels);
+      for (size_t level = 0; level < m_addr_bits.size(); level++) {
+        m_addr_bits[level] = calc_log2(count[level]);
+      }
+
+      // Last (Column) address have the granularity of the prefetch size
+      m_addr_bits[m_num_levels - 1] -= calc_log2(m_dram->m_internal_prefetch_size);
+
+      int tx_bytes = m_dram->m_internal_prefetch_size * m_dram->m_channel_width / 8;
+      m_tx_offset = calc_log2(tx_bytes);
+
+      // Determine where are the row and col bits for ChRaBaRoCo and RoBaRaCoCh
+      try {
+        m_row_bits_idx = m_dram->m_levels("row");
+      } catch (const std::out_of_range& r) {
+        throw std::runtime_error(fmt::format("Organization \"row\" not found in the spec, cannot use linear mapping!"));
+      }
+
+      // Assume column is always the last level
+      m_col_bits_idx = m_num_levels - 1;
+    }
+    
+//method----------------------------------------------------------------------------------------------------------------------------------
+	
+    void apply(Request& req) override {
+    //initalized the address vector and resized to match number of levels in DRAM-----------------------------------------------------------------------------------------------
+	  req.addr_vec.resize(m_num_levels, -1);
+	
+	//Shift the orginal address to the right by offset bits
+	    Addr_t addr = req.addr >> m_tx_offset;
+
+	fmt::print("{}\n","test1:");
+	    fmt::print("{}\n",addr);
+	    
+	    //gets to lower bits and assigns to m_col
+	    req.addr_vec[m_col_bits_idx] = slice_lower_bits(addr, 2);
+	    //fill in to each row (grab values)
+	    for (int lvl = 0; lvl < m_row_bits_idx; lvl++)
+		req.addr_vec[lvl] = slice_lower_bits(addr, m_addr_bits[lvl]);
+		
+	    //adjust column bits, shift by 2 to make room for the 2 least significant bit
+	    req.addr_vec[m_col_bits_idx] += slice_lower_bits(addr, m_addr_bits[m_col_bits_idx]-2) << 2;
+	    req.addr_vec[m_row_bits_idx] = (int) addr;
+
+	//k-Cipher (ceaser)---------------------------------------------------------------------------------------------------------------------------------------------------
+	    // Caesar cipher shift amount
+	    int caesar_shift_1 = 10; 
+
+	    // Apply Caesar cipher shift to the row address
+	    if (m_row_bits_idx >= 0 && m_row_bits_idx < m_num_levels) {
+		int row_address = req.addr_vec[m_row_bits_idx];
+		
+	fmt::print("{}\n",row_address);
+
+	//orginal------------------------------------------------------------------------------------------------------------------------------------------
+	fmt::print("{}\n","original:");
+	fmt::print("{}\n",req.addr_vec); 
+	
+		// Wrap-around for the shift to maintain address in range
+		//total number of row addresses
+		int total_row_space = 1 << m_addr_bits[m_row_bits_idx]; 
+	//mt::print("{}\n", total_row_space);
+		req.addr_vec[m_row_bits_idx] = (row_address + caesar_shift_1) % total_row_space;
+		
+	fmt::print("{}\n","correct final:");
+	fmt::print("{}\n",req.addr_vec); 
+	    }
+	
+	// Make a copy of req.addr_vec
+	std::vector<int> addr_vec_copy = req.addr_vec; 
+
+	//moving data to DRAM--------------------------------------------------------------------------------------------------------------------------------------------
+   	 // Apply XOR as before but also add Caesar cipher shift to the row bits
+   	 int row_xor_index = 2;
+    	//fill in shuffle address line
+   	 for (int lvl = 0; lvl < m_col_bits_idx; lvl++) {
+        	if (m_addr_bits[lvl] > 0) {
+            	// Set compare = right shift the req address by row index
+            	// And left shift 1 by address bit - 1, shifting column bits, zeroing out the rest
+            	int compare = (addr_vec_copy[m_col_bits_idx] >> row_xor_index) & ((1 << m_addr_bits[lvl]) - 1);
+
+            	// XOR the copied address and compare
+            	addr_vec_copy[lvl] = addr_vec_copy[lvl] xor compare;
+
+            	// Add address bit
+            	row_xor_index += m_addr_bits[lvl];
+        	}
+    	}
+
+	// Final-------------------------------------------------------------------------------------------------------------------------
+	fmt::print("{}\n","end product:");
+	fmt::print("{}\n",req.addr_vec);
+	}
+	
+	// Function to convert an integer to an 8-bit binary string-----------------------------------------------------------------------
+    
+	
+	//POWER CONSUMPTION-------------------------------------------------------------------------------------------------------
+	
+    };
+}
+
